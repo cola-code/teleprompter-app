@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Minimal Teleprompter</title>
+  <title>提词器</title>
   <style>
     :root {
       --bg: #000;
@@ -185,17 +185,17 @@
     }
 
     .prompt-window {
+      position: relative;
       width: min(100%, 62rem);
       height: 100%;
       overflow: hidden;
       padding: clamp(4rem, 9vh, 7rem) clamp(1.25rem, 5vw, 4rem);
-      scroll-behavior: auto;
     }
 
     .script {
       margin: 0 auto;
       max-width: 18ch;
-      min-height: 100%;
+      min-height: calc(100% + clamp(4rem, 9vh, 7rem));
       color: var(--text);
       font-size: clamp(2.4rem, 6.2vw, 6.5rem);
       line-height: 1.22;
@@ -205,6 +205,8 @@
       white-space: pre-wrap;
       overflow-wrap: break-word;
       text-wrap: pretty;
+      will-change: transform;
+      transform: translate3d(0, 0, 0);
     }
 
     .empty-state {
@@ -267,32 +269,32 @@
 </head>
 <body>
   <main class="app">
-    <section class="controls" aria-label="Teleprompter controls">
+    <section class="controls" aria-label="提词器控制栏">
       <div class="stat">
-        Reading time
-        <strong id="readingTime">0 min 00 sec</strong>
+        预计阅读时间
+        <strong id="readingTime">0 分 00 秒</strong>
       </div>
 
-      <button class="button primary" id="startButton" type="button">Start</button>
-      <button class="button" id="pauseButton" type="button" disabled>Pause</button>
-      <button class="button" id="fullscreenButton" type="button">Fullscreen</button>
+      <button class="button primary" id="startButton" type="button">开始</button>
+      <button class="button" id="pauseButton" type="button" disabled>暂停</button>
+      <button class="button" id="fullscreenButton" type="button">全屏</button>
 
       <label class="speed" for="speedRange">
-        <span>Slow</span>
-        <input id="speedRange" type="range" min="250" max="1400" step="25" value="700" />
-        <span>Fast</span>
+        <span>慢</span>
+        <input id="speedRange" type="range" min="180" max="900" step="10" value="450" />
+        <span id="speedValue">450 字/分钟</span>
       </label>
     </section>
 
     <section class="workspace">
       <aside class="editor">
-        <label for="scriptInput">Script</label>
-        <textarea id="scriptInput" spellcheck="true" placeholder="Paste or type your script here..."></textarea>
+        <label for="scriptInput">文字</label>
+        <textarea id="scriptInput" spellcheck="true" placeholder="在这里粘贴或输入你的文字..."></textarea>
       </aside>
 
-      <section class="stage" aria-label="Teleprompter display">
+      <section class="stage" aria-label="提词器显示区">
         <div class="prompt-window" id="promptWindow">
-          <div class="script empty-state" id="scriptDisplay">Your script will appear here.</div>
+          <div class="script empty-state" id="scriptDisplay">你的文字会显示在这里。</div>
         </div>
       </section>
     </section>
@@ -307,12 +309,16 @@
       const pauseButton = document.getElementById("pauseButton");
       const fullscreenButton = document.getElementById("fullscreenButton");
       const speedRange = document.getElementById("speedRange");
+      const speedValue = document.getElementById("speedValue");
       const readingTime = document.getElementById("readingTime");
 
       let animationId = null;
-      let lastFrameTime = null;
+      let animationStartTime = 0;
+      let elapsedBeforePause = 0;
       let isRunning = false;
       let isPaused = false;
+      let durationMs = 0;
+      let totalTravel = 0;
 
       const state = {
         get text() {
@@ -320,68 +326,90 @@
         },
         get charactersPerMinute() {
           return Number(speedRange.value);
-        },
-        get pixelsPerSecond() {
-          return state.charactersPerMinute / 18;
         }
       };
+
+      function getReadableCharacterCount(text) {
+        return Array.from(text).filter((character) => {
+          return /[\p{L}\p{N}\u4e00-\u9fff]/u.test(character);
+        }).length;
+      }
 
       function formatDuration(seconds) {
         const minutes = Math.floor(seconds / 60);
         const remainingSeconds = Math.max(0, Math.round(seconds % 60));
-        return `${minutes} min ${String(remainingSeconds).padStart(2, "0")} sec`;
+        return `${minutes} 分 ${String(remainingSeconds).padStart(2, "0")} 秒`;
+      }
+
+      function calculateDurationMs() {
+        const characters = getReadableCharacterCount(scriptInput.value);
+        return characters ? (characters / state.charactersPerMinute) * 60000 : 0;
       }
 
       function updateReadingTime() {
-        const characters = scriptInput.value.length;
-        const seconds = characters ? (characters / state.charactersPerMinute) * 60 : 0;
+        const seconds = calculateDurationMs() / 1000;
         readingTime.textContent = formatDuration(seconds);
+        speedValue.textContent = `${state.charactersPerMinute} 字/分钟`;
       }
 
       function updateDisplay() {
         const text = scriptInput.value.trim();
 
         if (!text) {
-          scriptDisplay.textContent = "Your script will appear here.";
+          scriptDisplay.textContent = "你的文字会显示在这里。";
           scriptDisplay.classList.add("empty-state");
         } else {
           scriptDisplay.textContent = text;
           scriptDisplay.classList.remove("empty-state");
         }
 
+        if (!isRunning) {
+          setOffset(0);
+        }
+
         updateReadingTime();
+      }
+
+      function setOffset(offset) {
+        scriptDisplay.style.transform = `translate3d(0, ${-offset}px, 0)`;
+      }
+
+      function measureScroll() {
+        const style = window.getComputedStyle(promptWindow);
+        const topPadding = parseFloat(style.paddingTop) || 0;
+        const bottomPadding = parseFloat(style.paddingBottom) || 0;
+        const visibleHeight = promptWindow.clientHeight - topPadding - bottomPadding;
+        totalTravel = Math.max(0, scriptDisplay.scrollHeight - visibleHeight + bottomPadding);
+        durationMs = Math.max(1, calculateDurationMs());
+      }
+
+      function currentProgress(now = performance.now()) {
+        if (!isRunning) return 0;
+        const elapsed = isPaused ? elapsedBeforePause : now - animationStartTime;
+        return Math.min(1, Math.max(0, elapsed / durationMs));
       }
 
       function stopScroll() {
         cancelAnimationFrame(animationId);
         animationId = null;
-        lastFrameTime = null;
+        animationStartTime = 0;
+        elapsedBeforePause = 0;
         isRunning = false;
         isPaused = false;
         pauseButton.disabled = true;
-        pauseButton.textContent = "Pause";
-        startButton.textContent = "Start";
+        pauseButton.textContent = "暂停";
+        startButton.textContent = "开始";
       }
 
       function scrollFrame(timestamp) {
         if (!isRunning || isPaused) {
-          lastFrameTime = timestamp;
-          animationId = requestAnimationFrame(scrollFrame);
           return;
         }
 
-        if (lastFrameTime === null) {
-          lastFrameTime = timestamp;
-        }
+        const progress = currentProgress(timestamp);
+        setOffset(totalTravel * progress);
 
-        const deltaSeconds = (timestamp - lastFrameTime) / 1000;
-        lastFrameTime = timestamp;
-        promptWindow.scrollTop += state.pixelsPerSecond * deltaSeconds;
-
-        const reachedEnd =
-          promptWindow.scrollTop + promptWindow.clientHeight >= promptWindow.scrollHeight - 1;
-
-        if (reachedEnd) {
+        if (progress >= 1) {
           stopScroll();
           return;
         }
@@ -398,13 +426,15 @@
         }
 
         cancelAnimationFrame(animationId);
-        promptWindow.scrollTop = 0;
+        measureScroll();
+        setOffset(0);
         isRunning = true;
         isPaused = false;
-        lastFrameTime = null;
+        elapsedBeforePause = 0;
+        animationStartTime = performance.now();
         pauseButton.disabled = false;
-        pauseButton.textContent = "Pause";
-        startButton.textContent = "Restart";
+        pauseButton.textContent = "暂停";
+        startButton.textContent = "重新开始";
         animationId = requestAnimationFrame(scrollFrame);
       }
 
@@ -412,21 +442,30 @@
         if (!isRunning) return;
 
         isPaused = !isPaused;
-        pauseButton.textContent = isPaused ? "Resume" : "Pause";
-        lastFrameTime = null;
+        pauseButton.textContent = isPaused ? "继续" : "暂停";
+
+        if (isPaused) {
+          cancelAnimationFrame(animationId);
+          animationId = null;
+          elapsedBeforePause = performance.now() - animationStartTime;
+          return;
+        }
+
+        animationStartTime = performance.now() - elapsedBeforePause;
+        animationId = requestAnimationFrame(scrollFrame);
       }
 
       async function toggleFullscreen() {
         try {
           if (!document.fullscreenElement) {
             await document.documentElement.requestFullscreen();
-            fullscreenButton.textContent = "Exit Fullscreen";
+            fullscreenButton.textContent = "退出全屏";
           } else {
             await document.exitFullscreen();
-            fullscreenButton.textContent = "Fullscreen";
+            fullscreenButton.textContent = "全屏";
           }
         } catch {
-          fullscreenButton.textContent = "Fullscreen";
+          fullscreenButton.textContent = "全屏";
         }
       }
 
@@ -434,17 +473,45 @@
         updateDisplay();
 
         if (!isRunning) {
-          promptWindow.scrollTop = 0;
+          setOffset(0);
+        } else {
+          const progress = currentProgress();
+          measureScroll();
+          animationStartTime = performance.now() - progress * durationMs;
+          setOffset(totalTravel * progress);
         }
       });
 
-      speedRange.addEventListener("input", updateReadingTime);
+      speedRange.addEventListener("input", () => {
+        const progress = currentProgress();
+        updateReadingTime();
+
+        if (isRunning) {
+          measureScroll();
+          const adjustedElapsed = progress * durationMs;
+
+          if (isPaused) {
+            elapsedBeforePause = adjustedElapsed;
+          } else {
+            animationStartTime = performance.now() - adjustedElapsed;
+          }
+        }
+      });
+
+      window.addEventListener("resize", () => {
+        if (!isRunning) return;
+
+        const progress = currentProgress();
+        measureScroll();
+        setOffset(totalTravel * progress);
+      });
+
       startButton.addEventListener("click", startScroll);
       pauseButton.addEventListener("click", togglePause);
       fullscreenButton.addEventListener("click", toggleFullscreen);
 
       document.addEventListener("fullscreenchange", () => {
-        fullscreenButton.textContent = document.fullscreenElement ? "Exit Fullscreen" : "Fullscreen";
+        fullscreenButton.textContent = document.fullscreenElement ? "退出全屏" : "全屏";
       });
 
       document.addEventListener("keydown", (event) => {
